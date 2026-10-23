@@ -1,0 +1,7 @@
+# Copy into the root of each project.
+# Windows git and Linux git (in the sandbox) share one working tree; normalizing to LF
+# stops both sides from seeing phantom line-ending changes.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

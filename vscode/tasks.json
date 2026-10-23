@@ -1,0 +1,52 @@
+{
+  // USER tasks (Command Palette > "Tasks: Open User Tasks"), NOT .vscode/tasks.json in a project:
+  // the agent cannot edit this file, so it cannot change what the launcher does.
+  // Assumes the repository is cloned to %USERPROFILE%\puddibox. Change the -File path if it is not.
+  //
+  // Each task opens the session in a new Windows Terminal window (wt.exe). The launcher
+  // waits for Enter at the end (-Pause), so the review and errors stay readable.
+  // To get a new tab in the last Windows Terminal window instead, change "new" to "0".
+  // To use the VS Code integrated terminal instead, see README.md.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Claude (sandbox)",
+      "type": "process",
+      "command": "wt.exe",
+      "args": [
+        "-w", "new", "--title", "Claude: ${workspaceFolderBasename}",
+        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", "${env:USERPROFILE}\\puddibox\\claude-box.ps1",
+        "-Path", "${workspaceFolder}", "-Pause"
+      ],
+      "presentation": { "reveal": "never", "close": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Claude (sandbox, bypass permissions)",
+      "type": "process",
+      "command": "wt.exe",
+      "args": [
+        "-w", "new", "--title", "Claude (bypass): ${workspaceFolderBasename}",
+        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", "${env:USERPROFILE}\\puddibox\\claude-box.ps1",
+        "-Path", "${workspaceFolder}", "-Bypass", "-Pause"
+      ],
+      "presentation": { "reveal": "never", "close": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Sandbox shell",
+      "type": "process",
+      "command": "wt.exe",
+      "args": [
+        "-w", "new", "--title", "Sandbox shell: ${workspaceFolderBasename}",
+        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", "${env:USERPROFILE}\\puddibox\\claude-box.ps1",
+        "-Path", "${workspaceFolder}", "-Shell", "-Pause"
+      ],
+      "presentation": { "reveal": "never", "close": true },
+      "problemMatcher": []
+    }
+  ]
+}

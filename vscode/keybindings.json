@@ -1,0 +1,6 @@
+// Add these entries to your keybindings.json
+// (Command Palette > "Preferences: Open Keyboard Shortcuts (JSON)").
+[
+  { "key": "ctrl+alt+c", "command": "workbench.action.tasks.runTask", "args": "Claude (sandbox)" },
+  { "key": "ctrl+alt+shift+c", "command": "workbench.action.tasks.runTask", "args": "Claude (sandbox, bypass permissions)" }
+]

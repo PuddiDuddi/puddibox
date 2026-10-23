@@ -1,0 +1,18 @@
+// Add these entries to your USER settings.json
+// (Command Palette > "Preferences: Open User Settings (JSON)").
+// They stop VS Code from running code that the agent can write, while the session runs.
+{
+  // Do not look for git repositories in subfolders or for open files. A repository that the
+  // agent creates in a subfolder can run commands on Windows (core.fsmonitor in its config).
+  // The repository of the opened folder itself is still detected when the folder opens.
+  // A .git created after that (git init, "UV: init current folder") needs
+  // "Developer: Reload Window" or "Git: Open Repository".
+  "git.autoRepositoryDetection": false,
+  "git.openRepositoryInParentFolders": "never",
+
+  // Test discovery imports conftest.py (and the test modules) on Windows.
+  "python.testing.autoTestDiscoverOnSaveEnabled": false,
+
+  // Keep Workspace Trust on: an untrusted folder does not run tasks or workspace settings.
+  "security.workspace.trust.enabled": true
+}
