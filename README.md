@@ -9,6 +9,9 @@ isolated WSL container (`wslc.exe`). VS Code stays on Windows and sees the same 
 You start a session with `Ctrl+Alt+C`. The puddibox VS Code extension shows the running sandboxes and
 your subscription usage in the status bar.
 
+The setup is made for **Python projects**: the agent image contains uv and Python 3.12/3.13, and the
+allowlist has PyPI. See [Python and uv](#python-and-uv) and [Other languages](#other-languages).
+
 > puddibox is an unofficial community project. It is not affiliated with or endorsed by Anthropic.
 
 ## Contents
@@ -24,6 +27,7 @@ your subscription usage in the status bar.
 - [Limitations: read this first](#limitations-read-this-first)
 - [Domain allowlist](#domain-allowlist)
 - [Python and uv](#python-and-uv)
+- [Other languages](#other-languages)
 - [Line endings](#line-endings)
 - [Troubleshooting](#troubleshooting)
 - [Status](#status)
@@ -406,6 +410,22 @@ Tip for `CLAUDE.md` in your projects:
 - Write `.ps1` files with ASCII characters only, or as UTF-8 with BOM (Windows PowerShell 5.1 reads
   UTF-8 without BOM as the legacy code page).
 ```
+
+## Other languages
+
+puddibox is set up and tested for Python only. In theory you can use a different agent image, for
+example with Node.js, Go or Rust (`claude-box.ps1 -Image my-image:local`). This is not documented
+here, so read the files yourself before you try it:
+
+- `agent/Dockerfile`: what the image must contain (user `claude` with UID 1000, `setpriv`, `tini`,
+  `curl`, `getent`, Claude Code, and the environment variables).
+- `agent/entrypoint.sh` and `agent/check-egress.sh`: the start checks. Your image must run them
+  unchanged as its entrypoint. Without them the sandbox is not verified.
+- `$DefaultDomains` in `claude-box.ps1`: the package registry of your language must be on the
+  allowlist (for example `registry.npmjs.org`). Each domain is a new exfiltration channel.
+- [Post-session review](#post-session-review): the list of trusted files is for Python projects.
+  Other toolchains have their own files that run on Windows (for example `package.json` scripts or
+  `build.rs`).
 
 ## Line endings
 
