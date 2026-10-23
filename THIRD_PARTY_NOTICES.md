@@ -37,4 +37,11 @@ SOFTWARE.
 ## Software installed in the images at build time
 
 The images download these at build time. They are not part of this repository and keep their
-own licenses: Debian, Alpine Linux, Squid, uv, Python (python-build-standalone), Claude Code.
+own licenses: Debian, Alpine Linux, Squid, uv, Python (python-build-standalone, and the Alpine
+`python3` package in `api-proxy`), Claude Code.
+
+## Build tools of the VS Code extension
+
+`npm install` in `vscext` downloads TypeScript (Apache-2.0), `@types/node` and `@types/vscode` (MIT),
+and `npx` downloads `@vscode/vsce` (MIT) to build the package. They are not part of this repository
+and are not included in the `.vsix` package.

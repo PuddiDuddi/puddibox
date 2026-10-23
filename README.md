@@ -6,7 +6,8 @@
 
 puddibox runs [Claude Code](https://code.claude.com) for a Windows project folder inside an
 isolated WSL container (`wslc.exe`). VS Code stays on Windows and sees the same files.
-You start a session with `Ctrl+Alt+C`.
+You start a session with `Ctrl+Alt+C`. The puddibox VS Code extension shows the running sandboxes and
+your subscription usage in the status bar.
 
 > puddibox is an unofficial community project. It is not affiliated with or endorsed by Anthropic.
 
@@ -16,6 +17,8 @@ You start a session with `Ctrl+Alt+C`.
 - [What is isolated](#what-is-isolated)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Login: token mode and /login](#login-token-mode-and-login)
+- [VS Code extension](#vs-code-extension)
 - [Daily use](#daily-use)
 - [Post-session review](#post-session-review)
 - [Limitations: read this first](#limitations-read-this-first)
@@ -31,20 +34,27 @@ You start a session with `Ctrl+Alt+C`.
 ```
  Windows                                   wslc session (VM)
  ───────                                   ─────────────────────────────────────────────────
- VS Code ──task──> claude-box.ps1 ───────> internal network (no route out)
+ VS Code ──ext/task──> claude-box.ps1 ───> internal network (no route out)
                                              ┌─────────────────────┐      ┌──────────────┐
  D:\proj\foo  <── bind mount ──────────────> │ agent container     │ ───> │ squid proxy  │ ──> allowlisted
                                              │ /workspace          │ 3128 │ CONNECT :443 │     HTTPS only
                                              │ user "claude", no   │      │ allowlist    │
                                              │ capabilities        │      └──────────────┘
-                                             └─────────────────────┘
+                                             │ placeholder token   │      ┌──────────────┐
+                                             │                     │ ───> │ api-proxy    │ ──> api.anthropic.com
+                                             └─────────────────────┘ 8080 │ real token   │     /v1/messages only
+                                                                          └──────────────┘
+ Windows Credential Manager ──token (token mode)──────────────────────────────────┘
 ```
 
 1. `claude-box.ps1` creates an internal network for the project. This network has no route out.
 2. The launcher starts a Squid proxy. The proxy is on the internal network and on the default network.
    It allows HTTPS (CONNECT to port 443) only to domains on the allowlist.
-3. The launcher starts the agent container on the internal network only.
-4. The agent container verifies the sandbox as `root` before it starts. If one check fails,
+3. Token mode only: the launcher starts `api-proxy` with the subscription token from Windows
+   Credential Manager. The proxy is the only way to the Claude API (see
+   [Login](#login-token-mode-and-login)).
+4. The launcher starts the agent container on the internal network only.
+5. The agent container verifies the sandbox as `root` before it starts. If one check fails,
    the container does not start:
    - `.venv` is a separate volume,
    - `.git`, `.vscode` and `.claude` are read-only,
@@ -52,9 +62,10 @@ You start a session with `Ctrl+Alt+C`.
    - there is no external DNS,
    - the host, the gateway, the cloud metadata address and `host.wslc.internal` are not reachable,
    - the proxy blocks non-allowlisted domains and bare IP addresses,
-   - the proxy allows `api.anthropic.com`.
-5. The container drops to user `claude` with no capabilities and `no_new_privs`, then starts Claude Code.
-6. When the session ends, the launcher removes the proxy and the network and shows a review of
+   - `/login` mode: the proxy allows `api.anthropic.com`;
+   - token mode: `api-proxy` answers, and `api.anthropic.com` is blocked for the agent.
+6. The container drops to user `claude` with no capabilities and `no_new_privs`, then starts Claude Code.
+7. When the session ends, the launcher removes the proxies and the network and shows a review of
    files that Windows tools execute or trust.
 
 ## What is isolated
@@ -67,6 +78,7 @@ You start a session with `Ctrl+Alt+C`.
 | `.vscode` | read-only | `tasks.json` and `settings.json` can run commands on Windows. |
 | `.claude` | read-only | Hooks in `.claude/settings.json` run if you start Claude Code for this project on Windows. |
 | Network | `--internal` network, no external DNS, only the allowlisting proxy (HTTPS, no bare IPs) | Limits code exfiltration through prompt injection. |
+| Subscription token (token mode) | outside the agent: Windows Credential Manager and the `api-proxy` container; the agent has a placeholder | A prompt injection cannot steal the token. |
 | Claude login and settings | volume `claude-config-<project>` | Projects do not share hooks, commands or conversation history. |
 | uv cache | volume `claude-uv-cache-<project>` | One project cannot poison packages for another. |
 | Privileges | user `claude`, no capabilities, `no_new_privs` | |
@@ -75,8 +87,10 @@ You start a session with `Ctrl+Alt+C`.
 
 - Windows 11 with WSL that includes WSL containers (`wsl --update`, then `wslc version`).
 - Windows Terminal (`wt.exe`). The VS Code tasks open sessions in it.
-- VS Code (optional, for the tasks and shortcuts).
+- VS Code (optional, for the extension or the tasks and shortcuts).
 - Git for Windows 2.38 or later (for `safe.bareRepository`).
+- Node.js 20 or later (optional, only to build the VS Code extension).
+- For token mode: a Claude Pro, Max, Team or Enterprise subscription.
 
 ## Installation
 
@@ -113,8 +127,9 @@ Do these steps one time.
    cd $env:USERPROFILE\puddibox
    .\Build-ClaudeSandbox.ps1
    ```
-   This builds `claude-egress-proxy:local` (Alpine + Squid) and `claude-sandbox:local`
-   (Debian + git + uv + Python 3.12/3.13 + Claude Code). Run it again to update Claude Code.
+   This builds `claude-egress-proxy:local` (Alpine + Squid), `claude-api-proxy:local`
+   (Alpine + Python) and `claude-sandbox:local` (Debian + git + uv + Python 3.12/3.13 + Claude Code).
+   Run it again to update Claude Code.
 
 4. Configure Git and Windows on the host:
    ```powershell
@@ -127,9 +142,12 @@ Do these steps one time.
      so a planted `git.bat` cannot replace the real `git`. Restart VS Code and terminals after this command.
 
 5. Configure VS Code:
-   - Command Palette > **Tasks: Open User Tasks**: add the tasks from `vscode\tasks.json`.
-   - Command Palette > **Preferences: Open Keyboard Shortcuts (JSON)**: add the entries from `vscode\keybindings.json`.
    - Command Palette > **Preferences: Open User Settings (JSON)**: add the entries from `vscode\settings.json`.
+   - Install the puddibox extension (recommended, see [VS Code extension](#vs-code-extension)). It
+     starts sessions with `Ctrl+Alt+C` and `Ctrl+Alt+Shift+C`.
+   - Without the extension: Command Palette > **Tasks: Open User Tasks**: add the tasks from
+     `vscode\tasks.json`, and Command Palette > **Preferences: Open Keyboard Shortcuts (JSON)**: add the
+     entries from `vscode\keybindings.json`. Do not add these shortcuts if you use the extension.
 
    Use user tasks, not `.vscode/tasks.json` in a project. The agent cannot edit user tasks.
 
@@ -151,30 +169,116 @@ Do these steps one time.
    ```bash
    touch .git/x                                  # must fail: Read-only file system
    curl -s --max-time 5 https://example.com      # must fail
-   curl -sI https://api.anthropic.com | head -1  # must show an HTTP status line
    getent hosts example.com                      # must print nothing
    id                                            # must show uid=1000(claude)
    ```
+   In `/login` mode, `curl -sI https://api.anthropic.com | head -1` must show an HTTP status line.
+   In token mode it must fail with `CONNECT tunnel failed, response 403`.
+
+7. Recommended: set up token mode (next section).
+
+## Login: token mode and /login
+
+The launcher uses token mode when a token is stored in Windows Credential Manager. Otherwise it uses `/login`.
+
+### Token mode (recommended)
+
+1. On Windows, run `claude setup-token`. It opens a browser and prints a token `sk-ant-oat...`.
+   The token is valid for about one year.
+2. Store the token:
+   ```powershell
+   & $env:USERPROFILE\puddibox\claude-box.ps1 -SetToken
+   ```
+   The launcher stores it in Windows Credential Manager as `puddibox:claude-oauth-token`. Windows
+   encrypts this entry for your account (DPAPI). `gh`, `glab` and Git Credential Manager use the same store.
+3. Clear the clipboard and close the terminal with the token.
+
+At each start the launcher reads the token and gives it only to the `api-proxy` container, by
+variable name, never on a command line. The agent gets `ANTHROPIC_BASE_URL=http://claude-api-<project>:8080`
+and a placeholder token. `api-proxy`:
+
+- always overwrites the authentication headers with the real token, so a request with an attacker's
+  API key cannot reach the attacker's account;
+- forwards only `/v1/messages`, so the agent cannot call other endpoints with your token (for example
+  to create an API key);
+- is the only way to `api.anthropic.com`. The egress proxy blocks that domain for the agent, and the
+  container checks this at startup.
+
+Limits of token mode:
+
+- The `setup-token` token can only send model requests. Remote Control and claude.ai connectors do not work.
+- The agent can still use your subscription limits.
+- Windows Credential Manager protects the token from other accounts and from a stolen disk. It does not
+  protect it from programs that run as your Windows user.
+
+Other commands:
+```powershell
+& $env:USERPROFILE\puddibox\claude-box.ps1 -RemoveToken   # delete the token, back to /login per project
+& $env:USERPROFILE\puddibox\claude-box.ps1 -NoToken       # this session only: ignore the token, use /login
+```
+If the token may have leaked, also revoke it on claude.ai.
+
+A project that used `/login` before still has `~/.claude/.credentials.json` in its config volume. Token
+mode does not use that file, but the agent can read it. Remove it once: start `-Shell`, then
+`rm ~/.claude/.credentials.json`.
+
+### /login mode
+
+Without a stored token, the first session in each project shows a login link. Open it in a browser on
+Windows. If the redirect does not return to the terminal, paste the code at `Paste code here`. The
+login is per project. In this mode the token is in the config volume, and `api.anthropic.com` is open
+for the agent (see [Exfiltration through allowed domains](#exfiltration-through-allowed-domains)).
+
+## VS Code extension
+
+The `vscext` folder contains the puddibox extension. Build and install it:
+
+```powershell
+cd $env:USERPROFILE\puddibox\vscext
+npm install
+npm run compile
+npm run package
+code --install-extension (Get-ChildItem puddibox-*.vsix | Select-Object -Last 1).FullName
+```
+
+Then run **Developer: Reload Window**. If the kit is not in `%USERPROFILE%\puddibox`, set
+`puddibox.launcherPath` in your user settings.
+
+What the extension gives you:
+
+- **Status bar, left**: the session of the current project (`sandbox`, `sandbox: bypass`, `sandbox: shell`),
+  a mark for a pending review, and `+N` for sandboxes of other projects. A click opens a menu.
+- **Status bar, right**: `$(vm-active) N` running sandboxes, then the 5-hour and 7-day subscription usage.
+- **Sidebar panel**: sessions with **Stop** and **Kill now**, project volumes, token, images (rebuild),
+  extra egress domains for the project, and the last review with diffs.
+- **Commands**: `Ctrl+Alt+C` (Claude), `Ctrl+Alt+Shift+C` (bypass, after a confirmation), and the
+  `puddibox` category in the Command Palette.
+
+Usage comes from the `api-proxy` log in token mode: the proxy writes the values of the
+`anthropic-ratelimit-unified-*` response headers. Without fresh sandbox data, a click on the usage item
+reads usage one time with the Windows Claude Code login. A `$(account)` mark shows that source. See
+[vscext/README.md](vscext/README.md) for all details.
+
+The extension reads no settings or files from the workspace, never touches the `setup-token` token,
+and warns when the launcher is inside a project folder with a running sandbox.
 
 ## Daily use
 
-| Shortcut / task | What it does |
+| Shortcut / command | What it does |
 | --- | --- |
 | `Ctrl+Alt+C` | Claude Code in the sandbox, with permission prompts |
 | `Ctrl+Alt+Shift+C` | Claude Code with `--dangerously-skip-permissions` |
-| Task **Sandbox shell** | `bash` in the same sandbox, for example `uv sync` or `uv run pytest` |
+| **Open sandbox shell** (extension) or task **Sandbox shell** | `bash` in the same sandbox, for example `uv sync` or `uv run pytest` |
 
-The first session in each project shows a login link. Open it in a browser on Windows. If the
-redirect does not return to the terminal, paste the code at `Paste code here`.
+A session opens in a new Windows Terminal window. At the end the window waits for Enter only when
+the review has findings, the review failed, or the exit code is unusual. Otherwise it closes after
+5 seconds. With the tasks: for a new tab instead of a new window, change `"new"` to `"0"`. For the VS
+Code integrated terminal, set `"command": "powershell.exe"`, remove the arguments before `-NoProfile`
+and the `-Pause` argument, and set `"reveal": "always"`. With the extension, set `puddibox.terminal`.
 
-The tasks open a new Windows Terminal window. At the end of the session the window waits for Enter,
-so you can read the review and errors. For a new tab instead of a new window, change `"new"` to `"0"`
-in the tasks. For the VS Code integrated terminal, set `"command": "powershell.exe"`, remove the
-arguments before `-NoProfile` and the `-Pause` argument, and set `"reveal": "always"`.
-
-End a session with `/exit` (Claude) or `exit` (shell). Do not close the window or the VS Code
-terminal while the session runs: the launcher then cannot clean up or show the review. If this
-happens, the next start for the same project cleans up and shows the review.
+End a session with `/exit` (Claude), `exit` (shell), or **Stop** in the extension. Do not close the
+window or the VS Code terminal while the session runs: the launcher then cannot clean up or show the
+review. If this happens, the next start for the same project cleans up and shows the review.
 
 ### Launcher options
 
@@ -185,7 +289,11 @@ claude-box.ps1 -Bypass                     # --dangerously-skip-permissions
 claude-box.ps1 -Continue                   # continue the last conversation
 claude-box.ps1 -Resume                     # pick a conversation to resume
 claude-box.ps1 -ClaudeArgs '--model opus --append-system-prompt "be brief"'
-claude-box.ps1 -Pause                      # wait for Enter at the end
+claude-box.ps1 -Pause                      # in a separate window: wait for Enter if there is something to read
+claude-box.ps1 -Status [-Json]             # project id, container and volume names, token, review; changes nothing
+claude-box.ps1 -SetToken                   # store a "claude setup-token" token (token mode)
+claude-box.ps1 -RemoveToken                # delete the stored token
+claude-box.ps1 -NoToken                    # this session only: /login mode
 ```
 
 These options make the isolation weaker. Use them only after a conscious decision:
@@ -210,6 +318,11 @@ difference after it (`+ added`, `~ changed`, `- removed`):
 - `.pth`, `.pyc`, `.bat`, `.cmd`, `.exe`, `.dll`, `.ps1`, `.lnk` and other executable files;
 - every link (symlink, junction), because on Windows it can point outside the project;
 - in the root `.git`: `config`, `hooks/`, `info/`.
+
+The launcher keeps the last review in `%USERPROFILE%\puddibox\state\<project>.last-review.json`. The
+extension shows it in the **Last review** section of the panel. The file
+`state\<project>.review.json` exists while a session runs; if it is still there after the session, the
+review did not run, and the next start shows it.
 
 The container sets `PYTHONDONTWRITEBYTECODE=1`, so a new `.pyc` file after a session is suspicious.
 Windows Python runs a `.pyc` whose header matches the source, even if the bytecode is different.
@@ -241,8 +354,10 @@ only after you read the diff.
 
 The allowlist limits exfiltration. It does not stop it. The proxy does not inspect TLS:
 
-- `api.anthropic.com` accepts requests with an attacker's API key. A prompt injection can send
-  code, or the login token from `~/.claude/.credentials.json`, that way.
+- `/login` mode: `api.anthropic.com` accepts requests with an attacker's API key. A prompt injection
+  can send code, or the login token from `~/.claude/.credentials.json`, that way. Token mode closes
+  this channel.
+- `.claude.ai` and `.claude.com` stay open in both modes.
 - Each domain that you add with `-AllowDomain` is a new channel. For example, `github.com` allows a
   push or a gist with an attacker's token.
 
@@ -255,6 +370,8 @@ than wslc gives.
 ## Domain allowlist
 
 Default: `api.anthropic.com`, `.claude.ai`, `.claude.com`, `pypi.org`, `files.pythonhosted.org`.
+
+In token mode the list has no `api.anthropic.com`. The agent reaches the Claude API only through `api-proxy`.
 
 There is no blocklist. The proxy blocks every domain that is not on the allowlist, every port
 other than 443, plain HTTP and bare IP addresses.
@@ -320,6 +437,10 @@ until the next checkout.
 | `Image '...' not found` | Build the images in a normal (not elevated) console. |
 | Claude cannot save "Always allow" | The project `.claude/` is read-only. Add the rule on Windows, or use `-ClaudeDirWritable`. |
 | `uv`: `Permission denied` on `/home/claude/.cache/uv` | Rebuild the image. The container fixes the volume ownership at the next start. |
+| `egress: FAIL, api.anthropic.com is reachable through the egress proxy in token mode` | `-AllowDomain` added `api.anthropic.com` back. Remove it, or use `-NoToken`. |
+| Claude asks for a login in token mode | Rebuild the images. The agent image marks the onboarding as done in token mode. |
+| Extension: `sandbox ?` or **Launcher status failed** | The launcher is missing or too old (no `-Status`). Update the kit, or check `puddibox.launcherPath`. |
+| Extension: usage always shows `$(account)` | No usage from the sandbox: no session in token mode runs, or `api-proxy` is older than the usage change. Rebuild the images. The tooltip shows the state. |
 
 Manual cleanup after a crash:
 ```powershell
@@ -332,7 +453,8 @@ wslc network rm <name>
 ## Status
 
 Tested on Windows 11 with wslc: image build, sandbox start checks, sandbox shell, Claude Code
-login and sessions, uv with PyPI, `hostLoopback: none`, `storagePath` on another drive.
+login and sessions, uv with PyPI, `hostLoopback: none`, `storagePath` on another drive, token mode
+through `api-proxy`, the VS Code extension (status bar, panel, stop from the panel).
 
 Not yet verified: that `wslc container rm` refuses to remove a running container (the launcher
 uses this to detect a running sandbox for the same project).

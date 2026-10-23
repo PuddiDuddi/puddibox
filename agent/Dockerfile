@@ -74,6 +74,9 @@ RUN set -eu; \
     su claude -s /bin/bash -c 'export PATH=/home/claude/.local/bin:$PATH; claude --version'; \
     su claude -s /bin/bash -c 'python3 --version && python --version'; \
     su claude -s /bin/bash -c 'uv python list --only-installed'; \
+    # "claude --version" leaves a config backup. A new config volume gets a copy of it, and
+    # Claude then warns at the first start that .claude.json is missing.
+    rm -rf /home/claude/.claude/backups /home/claude/.claude/.claude.json; \
     chown -R claude:claude /home/claude
 
 WORKDIR /workspace

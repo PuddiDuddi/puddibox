@@ -3,8 +3,9 @@
   // the agent cannot edit this file, so it cannot change what the launcher does.
   // Assumes the repository is cloned to %USERPROFILE%\puddibox. Change the -File path if it is not.
   //
-  // Each task opens the session in a new Windows Terminal window (wt.exe). The launcher
-  // waits for Enter at the end (-Pause), so the review and errors stay readable.
+  // Each task opens the session in a new Windows Terminal window (wt.exe). With -Pause the
+  // launcher waits for Enter at the end when the review has findings or an error occurred.
+  // The puddibox VS Code extension starts sessions the same way; these tasks are for use without it.
   // To get a new tab in the last Windows Terminal window instead, change "new" to "0".
   // To use the VS Code integrated terminal instead, see README.md.
   "version": "2.0.0",

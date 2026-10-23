@@ -1,0 +1,119 @@
+{
+  "name": "puddibox",
+  "displayName": "puddibox",
+  "description": "Claude Code sandbox sessions, subscription usage and project panel for puddibox",
+  "version": "0.2.1",
+  "publisher": "local",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/PuddiDuddi/puddibox" },
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "The extension reads no settings or files from the workspace. It only starts the sandbox launcher and reads container state."
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "commands": [
+      { "command": "puddibox.start", "title": "Start Claude in sandbox", "category": "puddibox", "icon": "$(play)" },
+      { "command": "puddibox.startBypass", "title": "Start Claude in sandbox (bypass permissions)", "category": "puddibox", "icon": "$(warning)" },
+      { "command": "puddibox.shell", "title": "Open sandbox shell", "category": "puddibox", "icon": "$(terminal)" },
+      { "command": "puddibox.stop", "title": "Stop sandbox", "category": "puddibox", "icon": "$(debug-stop)" },
+      { "command": "puddibox.showSessions", "title": "Show sandbox sessions", "category": "puddibox" },
+      { "command": "puddibox.refresh", "title": "Refresh", "category": "puddibox", "icon": "$(refresh)" },
+      { "command": "puddibox.setToken", "title": "Store setup-token", "category": "puddibox", "icon": "$(key)" },
+      { "command": "puddibox.removeToken", "title": "Remove stored token", "category": "puddibox", "icon": "$(trash)" },
+      { "command": "puddibox.rebuildImages", "title": "Rebuild sandbox images", "category": "puddibox", "icon": "$(tools)" },
+      { "command": "puddibox.editAllowlist", "title": "Edit extra egress domains for this project", "category": "puddibox", "icon": "$(edit)" },
+      { "command": "puddibox.removeVolume", "title": "Remove volume", "category": "puddibox", "icon": "$(trash)" },
+      { "command": "puddibox.usage.refresh", "title": "Refresh usage", "category": "puddibox" },
+      { "command": "puddibox.showLastReview", "title": "Show last review", "category": "puddibox", "icon": "$(open-preview)" },
+      { "command": "puddibox.openReviewChange", "title": "Open review change", "category": "puddibox" }
+    ],
+    "configuration": {
+      "title": "puddibox",
+      "properties": {
+        "puddibox.launcherPath": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Full path to claude-box.ps1. Empty: %USERPROFILE%\\puddibox\\claude-box.ps1. Keep it outside every sandboxed project."
+        },
+        "puddibox.wslcPath": {
+          "type": "string",
+          "default": "wslc",
+          "scope": "application",
+          "description": "wslc executable."
+        },
+        "puddibox.terminal": {
+          "type": "string",
+          "enum": ["windowsTerminal", "integrated"],
+          "default": "windowsTerminal",
+          "scope": "application",
+          "description": "Where a session opens: a new Windows Terminal window, or the VS Code terminal."
+        },
+        "puddibox.pollIntervalSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "scope": "application",
+          "description": "Fallback refresh of sandbox state, in addition to wslc events."
+        },
+        "puddibox.usage.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Show subscription usage (5h and 7d) in the status bar."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "puddibox", "title": "puddibox", "icon": "media/puddibox.svg" }
+      ]
+    },
+    "views": {
+      "puddibox": [
+        { "id": "puddibox.panel", "name": "Sandbox" }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        { "command": "puddibox.start", "when": "view == puddibox.panel", "group": "navigation@1" },
+        { "command": "puddibox.shell", "when": "view == puddibox.panel", "group": "navigation@2" },
+        { "command": "puddibox.refresh", "when": "view == puddibox.panel", "group": "navigation@9" }
+      ],
+      "view/item/context": [
+        { "command": "puddibox.stop", "when": "view == puddibox.panel && viewItem == session.running", "group": "inline" },
+        { "command": "puddibox.removeVolume", "when": "view == puddibox.panel && viewItem == volume.idle", "group": "inline" },
+        { "command": "puddibox.setToken", "when": "view == puddibox.panel && viewItem =~ /^token\\./", "group": "inline@1" },
+        { "command": "puddibox.removeToken", "when": "view == puddibox.panel && viewItem == token.stored", "group": "inline@2" },
+        { "command": "puddibox.rebuildImages", "when": "view == puddibox.panel && viewItem == images", "group": "inline" },
+        { "command": "puddibox.editAllowlist", "when": "view == puddibox.panel && viewItem == allowlist", "group": "inline" },
+        { "command": "puddibox.showLastReview", "when": "view == puddibox.panel && viewItem == review", "group": "inline" }
+      ],
+      "commandPalette": [
+        { "command": "puddibox.removeVolume", "when": "false" },
+        { "command": "puddibox.openReviewChange", "when": "false" }
+      ]
+    },
+    "keybindings": [
+      { "key": "ctrl+alt+c", "command": "puddibox.start" },
+      { "key": "ctrl+alt+shift+c", "command": "puddibox.startBypass" }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -watch -p tsconfig.json",
+    "package": "npx --yes @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

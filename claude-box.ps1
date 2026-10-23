@@ -14,6 +14,11 @@
     proxy that allows HTTPS to an allowlist of domains. The container verifies this at startup
     and refuses to start if it is not true.
   - Claude login, settings and the uv cache are per project (no shared state between projects).
+  - Token mode: with a token from "claude setup-token" in Windows Credential Manager (-SetToken),
+    the agent gets only a placeholder. An API proxy container holds the real token and adds it
+    to each request. api.anthropic.com is then closed for the agent, so a request with an
+    attacker's API key cannot carry data out. Without a stored token, the agent logs in with
+    /login and keeps the login in its config volume.
   - After the session the launcher lists every new or changed file that Windows tools execute
     or trust (a nested .git, conftest.py, pyproject.toml, .bat, links, ...). If the session was
     killed, the list is shown at the next start for the same project.
@@ -28,6 +33,10 @@
   .\claude-box.ps1 -ClaudeArgs '--model opus --append-system-prompt "be brief"'
   .\claude-box.ps1 -ConfigVolume claude-config   # share login and settings between projects
   .\claude-box.ps1 -Pause                # wait for Enter at the end (for a separate window)
+  .\claude-box.ps1 -SetToken             # store a "claude setup-token" token, used by all projects
+  .\claude-box.ps1 -RemoveToken          # delete the stored token (back to /login per project)
+  .\claude-box.ps1 -NoToken              # this session only: ignore the stored token, use /login
+  .\claude-box.ps1 -Path D:\projoo -Status -Json   # project id, names and state; changes nothing
 #>
 [CmdletBinding()]
 param(
@@ -39,11 +48,17 @@ param(
     [string[]]$AllowDomain = @(),
     [string]$Image = "claude-sandbox:local",
     [string]$ProxyImage = "claude-egress-proxy:local",
+    [string]$ApiProxyImage = "claude-api-proxy:local",
     [string]$ConfigVolume = "",
     [switch]$Resume,
     [switch]$Continue,
     [string]$ClaudeArgs = "",
-    [switch]$Pause
+    [switch]$Pause,
+    [switch]$SetToken,
+    [switch]$RemoveToken,
+    [switch]$NoToken,
+    [switch]$Status,
+    [switch]$Json
 )
 
 $ErrorActionPreference = 'Stop'
@@ -180,12 +195,74 @@ function Read-ReviewSnapshot([string]$File) {
     return $snap
 }
 
-function Show-ReviewReport([hashtable]$Before, [hashtable]$After, [string]$Title) {
-    $lines = foreach ($k in (@($Before.Keys) + @($After.Keys) | Sort-Object -Unique)) {
-        if (-not $Before.ContainsKey($k))     { ("  + added    $k  " + $(if ($After[$k] -like 'link*') { $After[$k] })).TrimEnd() }
-        elseif (-not $After.ContainsKey($k))  { "  - removed  $k" }
-        elseif ($Before[$k] -ne $After[$k])   { "  ~ changed  $k" }
+# Windows Credential Manager (generic credential, this user on this machine). Same store as
+# gh, glab and Git Credential Manager; Windows encrypts it with DPAPI for the current user.
+$TokenTarget = 'puddibox:claude-oauth-token'
+$TokenPlaceholder = 'sk-ant-oat01-puddibox-placeholder'
+
+function Initialize-CredApi {
+    if ('PuddiboxCred' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class PuddiboxCred {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct CREDENTIAL {
+        public int Flags; public int Type; public string TargetName; public string Comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public int CredentialBlobSize; public IntPtr CredentialBlob; public int Persist;
+        public int AttributeCount; public IntPtr Attributes; public string TargetAlias; public string UserName;
     }
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CredReadW(string target, int type, int flags, out IntPtr cred);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CredWriteW(ref CREDENTIAL cred, int flags);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CredDeleteW(string target, int type, int flags);
+    [DllImport("advapi32.dll")]
+    static extern void CredFree(IntPtr cred);
+    const int GENERIC = 1, PERSIST_LOCAL_MACHINE = 2;
+
+    public static string Read(string target) {
+        IntPtr p;
+        if (!CredReadW(target, GENERIC, 0, out p)) return null;
+        try {
+            var c = (CREDENTIAL)Marshal.PtrToStructure(p, typeof(CREDENTIAL));
+            var bytes = new byte[c.CredentialBlobSize];
+            Marshal.Copy(c.CredentialBlob, bytes, 0, bytes.Length);
+            return Encoding.Unicode.GetString(bytes);
+        } finally { CredFree(p); }
+    }
+    public static void Write(string target, string user, string secret) {
+        // UTF-16, like the Credential Manager panel and cmdkey, so a token added there works too.
+        var bytes = Encoding.Unicode.GetBytes(secret);
+        var c = new CREDENTIAL { Type = GENERIC, TargetName = target, UserName = user,
+            Persist = PERSIST_LOCAL_MACHINE, CredentialBlobSize = bytes.Length,
+            CredentialBlob = Marshal.AllocHGlobal(bytes.Length) };
+        try {
+            Marshal.Copy(bytes, 0, c.CredentialBlob, bytes.Length);
+            if (!CredWriteW(ref c, 0)) throw new Exception("CredWrite failed, error " + Marshal.GetLastWin32Error());
+        } finally { Marshal.FreeHGlobal(c.CredentialBlob); }
+    }
+    public static bool Delete(string target) { return CredDeleteW(target, GENERIC, 0); }
+}
+'@
+}
+
+# Prints the report and returns the changes as objects (change, path, detail); none = no output.
+function Show-ReviewReport([hashtable]$Before, [hashtable]$After, [string]$Title) {
+    $changes = @(foreach ($k in (@($Before.Keys) + @($After.Keys) | Sort-Object -Unique)) {
+        if (-not $Before.ContainsKey($k)) {
+            [pscustomobject]@{ change = 'added'; path = $k; detail = $(if ($After[$k] -like 'link*') { $After[$k] } else { '' }) }
+        } elseif (-not $After.ContainsKey($k)) {
+            [pscustomobject]@{ change = 'removed'; path = $k; detail = '' }
+        } elseif ($Before[$k] -ne $After[$k]) {
+            [pscustomobject]@{ change = 'changed'; path = $k; detail = '' }
+        }
+    })
+    $mark = @{ added = '+ added  '; removed = '- removed'; changed = '~ changed' }
+    $lines = $changes | ForEach-Object { ("  $($mark[$_.change])  $($_.path)  $($_.detail)").TrimEnd() }
     if (-not $lines) {
         Write-Host "Review: no changes to files that the host executes or trusts."
         return
@@ -197,6 +274,39 @@ function Show-ReviewReport([hashtable]$Before, [hashtable]$After, [string]$Title
     Write-Host "Check each file in the VS Code diff. A nested .git, a .pth or .pyc file, an executable" -ForegroundColor Yellow
     Write-Host "or a link is suspicious. Do not run tests, uv sync or scripts on Windows before that." -ForegroundColor Yellow
     Write-Host ""
+    return $changes
+}
+
+# The last review stays in a file, so the VS Code extension can show it after the window closes.
+function Save-LastReview([string]$File, [string]$Kind, [object[]]$Changes, [int]$ExitCode) {
+    [ordered]@{
+        schema   = 1
+        at       = (Get-Date).ToUniversalTime().ToString('o')
+        kind     = $Kind
+        exitCode = $ExitCode
+        changes  = @($Changes)
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $File -Encoding UTF8
+}
+
+# ---- Token management (no sandbox) ----------------------------------------------------------
+
+if ($SetToken -and $RemoveToken) { throw "Use -SetToken or -RemoveToken, not both." }
+if ($SetToken) {
+    Initialize-CredApi
+    Write-Host "Run 'claude setup-token' on Windows (or in any terminal with a browser) and paste the token."
+    $secure = Read-Host -AsSecureString "Token"
+    $token = ([Net.NetworkCredential]::new('', $secure).Password).Trim()
+    if ($token -notmatch '^sk-ant-oat[0-9A-Za-z_-]+$') { throw "This is not a token from 'claude setup-token' (sk-ant-oat...)." }
+    [PuddiboxCred]::Write($TokenTarget, 'claude-setup-token', $token)
+    $token = $null
+    Write-Host "Token stored in Windows Credential Manager as '$TokenTarget'. All projects use it from the next start."
+    exit 0
+}
+if ($RemoveToken) {
+    Initialize-CredApi
+    if ([PuddiboxCred]::Delete($TokenTarget)) { Write-Host "Token removed." } else { Write-Host "No stored token." }
+    Write-Host "Also revoke it on claude.ai if it may have leaked."
+    exit 0
 }
 
 # ---- Arguments ---------------------------------------------------------------------------
@@ -220,6 +330,7 @@ $Id = "$leaf-$hash"
 
 $AgentName  = "claude-$Id"
 $ProxyName  = "claude-proxy-$Id"
+$ApiName    = "claude-api-$Id"
 $NetName    = "claude-int-$Id"
 $VenvVol    = "claude-venv-$Id"
 # Per project: a shared volume would let one project plant hooks, commands or poisoned
@@ -227,8 +338,58 @@ $VenvVol    = "claude-venv-$Id"
 $UvCacheVol = "claude-uv-cache-$Id"
 if (-not $ConfigVolume) { $ConfigVolume = "claude-config-$Id" }
 
-$StateDir = Join-Path $env:LOCALAPPDATA 'claude-sandbox'
+$StateDir = Join-Path $env:USERPROFILE 'puddibox\state'
+# Earlier versions kept the state in %LOCALAPPDATA%\claude-sandbox. Move this project's files once.
+$OldStateDir = Join-Path $env:LOCALAPPDATA 'claude-sandbox'
+if (-not $Status -and (Test-Path -LiteralPath $OldStateDir)) {
+    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+    Get-ChildItem -LiteralPath $OldStateDir -Filter "$Id.*.json" -File | ForEach-Object {
+        $dest = Join-Path $StateDir $_.Name
+        if (-not (Test-Path -LiteralPath $dest)) { Move-Item -LiteralPath $_.FullName -Destination $dest }
+    }
+}
 $PendingReview = Join-Path $StateDir "$Id.review.json"
+$LastReview = Join-Path $StateDir "$Id.last-review.json"
+
+# ---- Status (no side effects: no wslc, no images, no files written) ------------------------
+
+if ($Status) {
+    Initialize-CredApi
+    $stored = $null -ne [PuddiboxCred]::Read($TokenTarget)
+    $last = $null
+    if (Test-Path -LiteralPath $LastReview) {
+        try { $last = Get-Content -Raw -LiteralPath $LastReview | ConvertFrom-Json } catch { $last = $null }
+    }
+    $info = [ordered]@{
+        schema        = 1
+        project       = $Project
+        id            = $Id
+        containers    = [ordered]@{ agent = $AgentName; apiProxy = $ApiName; egressProxy = $ProxyName }
+        network       = $NetName
+        volumes       = [ordered]@{ config = $ConfigVolume; venv = $VenvVol; uvCache = $UvCacheVol }
+        tokenStored   = $stored
+        reviewPending = [bool]((Test-Path -LiteralPath $PendingReview) -or
+                               (Test-Path -LiteralPath (Join-Path $OldStateDir "$Id.review.json")))
+        images        = [ordered]@{ agent = $Image; egressProxy = $ProxyImage; apiProxy = $ApiProxyImage }
+        lastReview    = $last
+    }
+    if ($Json) {
+        $info | ConvertTo-Json -Compress -Depth 6
+    } else {
+        Write-Host "Project:        $Project"
+        Write-Host "Id:             $Id"
+        Write-Host "Agent:          $AgentName"
+        Write-Host "API proxy:      $ApiName"
+        Write-Host "Egress proxy:   $ProxyName"
+        Write-Host "Network:        $NetName"
+        Write-Host "Volumes:        $ConfigVolume, $VenvVol, $UvCacheVol"
+        Write-Host "Token stored:   $stored"
+        Write-Host "Review pending: $($info.reviewPending)"
+        if ($last) { Write-Host "Last review:    $($last.at), $(@($last.changes).Count) change(s)" }
+        Write-Host "Images:         $Image, $ProxyImage, $ApiProxyImage"
+    }
+    exit 0
+}
 
 # One sandbox per project at a time. A stopped leftover can be removed; a running one cannot
 # (assumes "wslc container rm" refuses a running container, like docker).
@@ -244,8 +405,26 @@ if (Invoke-WslcQuiet container inspect $AgentName) {
 if ((Get-WslcOutput network create '--help') -notmatch '--internal') {
     throw "This wslc has no 'network create --internal'; the agent cannot be isolated. Run 'wsl --update'."
 }
+
+$token = $null
+if (-not $NoToken) {
+    Initialize-CredApi
+    $token = [PuddiboxCred]::Read($TokenTarget)
+    if ($token) {
+        $token = $token.Trim()
+        if ($token -notmatch '^sk-ant-oat[0-9A-Za-z_-]+$') {
+            throw "The stored '$TokenTarget' is not a token from 'claude setup-token'. Run -SetToken again, or -NoToken."
+        }
+    }
+}
+$TokenMode = [bool]$token
+$LabelMode = if ($Shell) { 'shell' } elseif ($Bypass) { 'bypass' } else { 'claude' }
+$LabelAuth = if ($TokenMode) { 'token' } else { 'login' }
+$images = @($Image, $ProxyImage)
+if ($TokenMode) { $images += $ApiProxyImage }
+
 $imageList = Get-WslcOutput image list
-foreach ($img in @($Image, $ProxyImage)) {
+foreach ($img in $images) {
     $repo, $tag = $img -split ':', 2
     if (-not $tag) { $tag = 'latest' }
     $re = "(?m)(^|[\s/])$([regex]::Escape($repo))(\s+|:)$([regex]::Escape($tag))(\s|$)"
@@ -279,23 +458,39 @@ foreach ($d in $mountDirs) {
     }
 }
 
-$domains = @($DefaultDomains + ($AllowDomain | ForEach-Object { $_ -split ',' }) |
+# Token mode: the agent reaches the Claude API only through the API proxy.
+$baseDomains = if ($TokenMode) { $DefaultDomains | Where-Object { $_ -ne 'api.anthropic.com' } } else { $DefaultDomains }
+$domains = @($baseDomains + ($AllowDomain | ForEach-Object { $_ -split ',' }) |
     ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ } | Select-Object -Unique)
+if ($TokenMode -and ($domains -contains 'api.anthropic.com' -or $domains -contains '.anthropic.com')) {
+    throw "Token mode closes api.anthropic.com for the agent. Remove it from -AllowDomain, or use -NoToken."
+}
 $ProxyUrl = "http://${ProxyName}:3128"
+$ApiUrl = "http://${ApiName}:8080"
 $NoProxy = "localhost,127.0.0.1"
+if ($TokenMode) { $NoProxy += ",$ApiName" }
 
 # ---- Review left over from a session that was killed without teardown ---------------------
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+$leftoverChanges = @()
 if (Test-Path -LiteralPath $PendingReview) {
-    Show-ReviewReport (Read-ReviewSnapshot $PendingReview) (Get-ReviewSnapshot $Project) `
-        "The previous session ended without a review. Changes since its start (your own edits included):"
+    $leftoverChanges = @(Show-ReviewReport (Read-ReviewSnapshot $PendingReview) (Get-ReviewSnapshot $Project) `
+        "The previous session ended without a review. Changes since its start (your own edits included):")
+    Save-LastReview $LastReview 'leftover' $leftoverChanges -1
 }
 
 # ---- Clean up leftovers from a session that was killed without teardown --------------------
 
 Remove-WslcContainer $ProxyName
+Remove-WslcContainer $ApiName
 $null = Invoke-WslcQuiet network rm $NetName
+
+# Labels that the VS Code extension reads to find sandboxes.
+function Get-PuddiboxLabel([string]$Role) {
+    return @('--label', "puddibox.id=$Id", '--label', "puddibox.role=$Role",
+             '--label', "puddibox.mode=$LabelMode", '--label', "puddibox.auth=$LabelAuth")
+}
 
 # ---- Start -------------------------------------------------------------------------------
 
@@ -308,15 +503,38 @@ try {
     wslc network create --internal $NetName | Out-Null; Assert-Wslc "network create"
 
     # Proxy: starts on the default (internet) network, then joins the internal one.
-    wslc run -d --name $ProxyName -e "PROXY_ALLOW_DOMAINS=$($domains -join ' ')" $ProxyImage | Out-Null
+    $egressLabels = Get-PuddiboxLabel egress
+    wslc run -d --name $ProxyName @egressLabels -e "PROXY_ALLOW_DOMAINS=$($domains -join ' ')" $ProxyImage | Out-Null
     Assert-Wslc "proxy run"
     wslc network connect $NetName $ProxyName; Assert-Wslc "proxy network connect"
     Wait-ContainerLog $ProxyName 'Accepting HTTP Socket connections' 'proxy: rejected|FATAL' 30
     Write-Host "Egress allowlist: $($domains -join ', ')"
 
+    if ($TokenMode) {
+        # The token goes to wslc by variable name only, never on a command line. The variable
+        # is set for this process only for the run command, then the earlier value comes back.
+        $savedToken = $env:CLAUDE_CODE_OAUTH_TOKEN
+        try {
+            $env:CLAUDE_CODE_OAUTH_TOKEN = $token
+            $apiLabels = Get-PuddiboxLabel api
+            wslc run -d --name $ApiName @apiLabels -e CLAUDE_CODE_OAUTH_TOKEN $ApiProxyImage | Out-Null
+            Assert-Wslc "API proxy run"
+        } finally {
+            $env:CLAUDE_CODE_OAUTH_TOKEN = $savedToken
+            $token = $null
+        }
+        wslc network connect $NetName $ApiName; Assert-Wslc "API proxy network connect"
+        Wait-ContainerLog $ApiName 'api-proxy: listening' 'api-proxy: FATAL|Traceback' 30
+        Write-Host "Claude API: token mode, through $ApiUrl (the agent has no token)"
+    } else {
+        Write-Host "Claude API: /login mode (no stored token; see -SetToken)"
+    }
+
     $agentArgs = @(
         '--rm', '-it',
         '--name', $AgentName,
+        '--label', "puddibox.id=$Id", '--label', 'puddibox.role=agent',
+        '--label', "puddibox.mode=$LabelMode", '--label', "puddibox.auth=$LabelAuth",
         '--network', $NetName,
         '-e', "HTTPS_PROXY=$ProxyUrl", '-e', "HTTP_PROXY=$ProxyUrl", '-e', "NO_PROXY=$NoProxy",
         '-e', "https_proxy=$ProxyUrl", '-e', "http_proxy=$ProxyUrl", '-e', "no_proxy=$NoProxy",
@@ -329,6 +547,15 @@ try {
         '-v', "${VenvVol}:/workspace/.venv",
         '-v', "$(Join-Path $Project '.vscode'):/workspace/.vscode:ro"
     )
+    if ($TokenMode) {
+        # The placeholder makes Claude Code use the subscription; the API proxy replaces it.
+        # check-egress.sh tests the egress proxy with claude.ai, as api.anthropic.com is closed.
+        $agentArgs += @(
+            '-e', "ANTHROPIC_BASE_URL=$ApiUrl",
+            '-e', "CLAUDE_CODE_OAUTH_TOKEN=$TokenPlaceholder",
+            '-e', 'EGRESS_ALLOWED_TEST_HOST=claude.ai'
+        )
+    }
     if (-not $ClaudeDirWritable) {
         $agentArgs += @('-v', "$(Join-Path $Project '.claude'):/workspace/.claude:ro")
     }
@@ -361,13 +588,28 @@ try {
 finally {
     $ErrorActionPreference = 'Continue'
     Remove-WslcContainer $ProxyName
+    Remove-WslcContainer $ApiName
     $null = Invoke-WslcQuiet network rm $NetName
+    $reviewChanges = @()
+    $reviewFailed = $false
     try {
-        Show-ReviewReport $before (Get-ReviewSnapshot $Project) "This session changed files that Windows tools execute or trust:"
+        $reviewChanges = @(Show-ReviewReport $before (Get-ReviewSnapshot $Project) "This session changed files that Windows tools execute or trust:")
+        Save-LastReview $LastReview 'session' $reviewChanges $exitCode
         Remove-Item -LiteralPath $PendingReview -Force
     } catch {
+        $reviewFailed = $true
         Write-Warning "Review failed: $_. It runs again at the next start for this project."
     }
 }
-if ($Pause) { [void](Read-Host "Session ended. Press Enter to close") }
+# -Pause waits only when there is something to read: review changes, a failed review, or an
+# unusual exit. 0 = Claude exited, 130 = Ctrl+C, 137/143 = stopped (SIGKILL/SIGTERM).
+# Errors before this point stop at the trap above.
+if ($Pause) {
+    if ($reviewChanges.Count -or $leftoverChanges.Count -or $reviewFailed -or $exitCode -notin 0, 130, 137, 143) {
+        [void](Read-Host "Session ended (exit code $exitCode). Press Enter to close")
+    } else {
+        Write-Host "Session ended (exit code $exitCode). No review findings; this window closes in 5 s."
+        Start-Sleep -Seconds 5
+    }
+}
 exit $exitCode

@@ -5,6 +5,8 @@
 #   HTTPS_PROXY                 required
 #   EGRESS_ALLOWED_TEST_HOST    allowlisted host that must work via the proxy (api.anthropic.com)
 #   EGRESS_BLOCKED_TEST_HOST    non-allowlisted host that must fail (example.com)
+#   ANTHROPIC_BASE_URL          set = token mode: the Claude API must be reachable only through
+#                               this API proxy, and api.anthropic.com must be blocked
 set -uo pipefail
 
 : "${HTTPS_PROXY:?HTTPS_PROXY not set}"
@@ -61,5 +63,14 @@ curl -sk --max-time 10 -o /dev/null "https://1.1.1.1" \
 # 5. The proxy allows the Claude API (any HTTP response means the TLS tunnel works).
 curl -s --max-time 15 -o /dev/null "https://$ALLOWED" \
   || fail "$ALLOWED is not reachable through the proxy"
+
+# 6. Token mode: the API proxy answers, and api.anthropic.com is closed. Through an open
+#    api.anthropic.com, a request with an attacker's API key carries data to the attacker.
+if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+  curl -s --noproxy '*' --max-time 10 -o /dev/null "$ANTHROPIC_BASE_URL/" \
+    || fail "the API proxy $ANTHROPIC_BASE_URL does not answer"
+  curl -s --max-time 10 -o /dev/null "https://api.anthropic.com" \
+    && fail "api.anthropic.com is reachable through the egress proxy in token mode"
+fi
 
 echo "egress: proxy-only egress verified"

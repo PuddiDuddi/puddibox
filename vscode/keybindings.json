@@ -1,4 +1,6 @@
-// Add these entries to your keybindings.json
+// The puddibox extension already binds ctrl+alt+c / ctrl+alt+shift+c to its own commands.
+// These task entries are only for use WITHOUT the extension; do not add both.
+// Add them to your keybindings.json
 // (Command Palette > "Preferences: Open Keyboard Shortcuts (JSON)").
 [
   { "key": "ctrl+alt+c", "command": "workbench.action.tasks.runTask", "args": "Claude (sandbox)" },

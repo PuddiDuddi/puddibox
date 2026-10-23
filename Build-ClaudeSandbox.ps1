@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Builds the two images used by claude-box.ps1. Run again to update Claude Code.
+  Builds the three images used by claude-box.ps1. Run again to update Claude Code.
 
 .EXAMPLE
   .\Build-ClaudeSandbox.ps1
@@ -19,13 +19,16 @@ try {
     wslc build -t claude-egress-proxy:local proxy
     if ($LASTEXITCODE -ne 0) { throw "proxy image build failed" }
 
+    wslc build -t claude-api-proxy:local api-proxy
+    if ($LASTEXITCODE -ne 0) { throw "API proxy image build failed" }
+
     wslc build -t claude-sandbox:local `
         --build-arg "PYTHON_VERSIONS=$PythonVersions" `
         --build-arg "DEFAULT_PYTHON=$DefaultPython" `
         agent
     if ($LASTEXITCODE -ne 0) { throw "agent image build failed" }
 
-    Write-Host "Done. Images: claude-sandbox:local, claude-egress-proxy:local"
+    Write-Host "Done. Images: claude-sandbox:local, claude-egress-proxy:local, claude-api-proxy:local"
 }
 finally {
     Pop-Location

@@ -48,9 +48,31 @@ case "${EGRESS_MODE:-proxy}" in
   *)     fail "unknown EGRESS_MODE '${EGRESS_MODE}'" ;;
 esac
 
+# 5. Token mode: mark onboarding as done. Onboarding tests the connection to api.anthropic.com
+#    directly (not through ANTHROPIC_BASE_URL), which is closed in token mode, and then asks
+#    for a login although CLAUDE_CODE_OAUTH_TOKEN is set. Runs as claude, because the agent
+#    controls this volume and could plant a link there for root to follow.
+if [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  setpriv --reuid=claude --regid=claude --init-groups --no-new-privs -- python3 -I -c '
+import json, os, sys
+p = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], ".claude.json")
+try:
+    with open(p) as f:
+        cfg = json.load(f)
+except FileNotFoundError:
+    cfg = {}
+except (OSError, ValueError) as e:
+    sys.exit(f"sandbox: WARNING, cannot read {p}: {e}")
+if cfg.get("hasCompletedOnboarding") is not True:
+    cfg["hasCompletedOnboarding"] = True
+    with open(p, "w") as f:
+        json.dump(cfg, f, indent=2)
+' || true
+fi
+
 echo "sandbox: checks passed, starting as user claude"
 
-# 5. Drop to the unprivileged user with no capabilities and no way to regain them.
+# 6. Drop to the unprivileged user with no capabilities and no way to regain them.
 exec setpriv --reuid=claude --regid=claude --init-groups \
      --inh-caps=-all --bounding-set=-all --no-new-privs \
      -- "$@"
